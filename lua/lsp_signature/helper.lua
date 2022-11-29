@@ -380,17 +380,41 @@ local function get_border_height(opts)
   return height
 end
 
+-- 计算floating window显示的位置
+-- contents: floating window里要显示的内容，是一个字符串数组
+-- opts: 目前已知的一些上下文信息
 helper.cal_pos = function(contents, opts)
+  -- "."是获取当前光标所在的行号
+  -- "w0"是当前window显示的第一行的行号
+  -- 所以这里lnum是当前window从第一行到光标所在行（包括光标所在行）的总行数
   local lnum = fn.line(".") - fn.line("w0") + 1
 
+  -- winline()是获取光标在当前window的第几行
+  -- 所以lines_above是当前window中光标以上的行数，不包括光标所在行
+  -- @todo：上面的lnum可以改成lnum = fn.winline()
   local lines_above = fn.winline() - 1
+  -- 当前window中光标以下的行数，不包括光标所在行
   local lines_below = fn.winheight(0) - fn.winline() -- not counting current
   -- wont fit if move floating above current line
+  -- 如果floating_window_above_cur_line配置了false，或者光标上面只有一行，则直接返回
+  -- @todo：这里为什么是2？
   if not _LSP_SIG_CFG.floating_window_above_cur_line or lnum <= 2 then
     return {}, 0
   end
   local util = vim.lsp.util
+  -- _trim()在帮助文档中暂时没找到，可以看下neovim源码的runtime/lua/vim/lsp/util.lua（目前是neovim 0.8.1版本）
+  -- 作用是1、把contents的空行干掉；2、根据opts中的pad_top和pad_bottom的数值来填充contents的上下空行
+  -- @todo：这里有个bug，一般是没有pad_top和pad_bottom这两个参数，但是如果手动赋值，
+  -- 在本代码文件中的highlight_parameter方法中调用api.nvim_buf_set_extmark时会报错col value outside range
   contents = util._trim(contents, opts)
+  -- 会修改传入的参数，应该是传入markdown，然后会尝试识别出代码块的语言类型
+  -- 如果没有被修改的话，会返回一个文件类型或者“markdown”
+  -- 从源码来看，有三种情况：
+  -- 1、当首行是```{language_id}，末行是```，会给你把这两行裁剪掉，只剩下代码，然后返回语言类型
+  -- 2、当首行是```{language_id}，另外一半的```是在中间而不是在末行，则不裁剪，返回markdown
+  -- 3、首行不带{language_id}或者根本没有```，则直接返回markdown
+  -- @todo：如果严谨一点说，try_trim_markdown_code_blocks这个官方函数有个bug，当首行是```{language_id}，
+  --        但另外一半```不存在，会被裁剪掉第一行和最后一行，会导致最后一行真实数据丢失
   util.try_trim_markdown_code_blocks(contents)
   log(vim.inspect(contents))
 
@@ -671,12 +695,18 @@ helper.get_doc = function(result)
   end
 end
 
+-- 看当前是否有cmp的补全或者neovim自带的补全显示出来
 helper.completion_visible = function()
+  -- lua_pcall的p是指protected mode（保护模式），跟lua_call的区别是如果有异常会返回错误码
   local hascmp, cmp = pcall(require, "cmp")
+  -- 如果cmp加载成功，hascmp应该是返回true
+  -- 然后再调用cmp的visible方法，看当前是否有补全的menu在显示
+  -- @todo：这里的补全menu是特指补全的menu，还是cmp提供的所有floating window？
   if hascmp then
     return cmp.visible()
   end
-
+  -- 如果没有安装cmp，再通过内置的pumvisible方法看下是否有其他popupmenu
+  -- 这里的pum是指popupmenu，在按下ctrl-p的时候出现的vim自带补全是个popupmenu
   return fn.pumvisible() ~= 0
 end
 
