@@ -1,47 +1,98 @@
+-- nvim对外暴露了api，给插件、rpc、lua、vimL使用
+-- 查看:h API
 local api = vim.api
 local fn = vim.fn
+-- 声明一个对象
 local M = {}
+-- 加载隔壁的helper模块
+-- aa.bb这种格式是nvim自己定义的，会去找lua/aa/bb.lua或者lua/aa/bb/init.lua
+-- 详见:h lua-require
 local helper = require("lsp_signature.helper")
+-- 用于找到活跃的signature
 local match_parameter = helper.match_parameter
 -- local check_closer_char = helper.check_closer_char
 
+-- 好像只是一个中间过程的变量，没有被直接用到
 local status_line = { hint = "", label = "" }
+-- 看起来是一些flag的管理器
 local manager = {
+  -- neovim支持的所有事件可以看:h events，或者看neovim源码的src/nvim/auevents.lua，目前有123个
+  -- 跟InsertCharPre事件相关的flag，具体看:h
+  -- InsertCharPre，开启后会在每键入一个字符时都会触发这个事件，可能会影响性能
   insertChar = false, -- flag for InsertCharPre event, turn off imediately when performing completion
+  -- InsertLeave事件，从insert模式离开的时候会触发
   insertLeave = true, -- flag for InsertLeave, prevent every completion if true
+  -- 改动次数的计数器，具体可以看:h changetick
   changedTick = 0, -- handle changeTick
+  -- 手动进行补全的comfirm操作
   confirmedCompletion = false, -- flag for manual confirmation of completion
+  -- 定时器
   timer = nil,
 }
+-- 路径分割符，如果是windows系统用'\\'，其他用'/'
+-- vim.loop.os_uname()可以查看:h uv.os_uname()
+-- loop是指libuv的时间循环机制，libuv是neovim引入的，老vim不支持
+-- 从帮助文档中可以看到，除了提供时间循环相关的功能，uv还提供其他的能力，
+-- 比如获取系统名称、路径相关、进程相关、内存、cpu等等
 local path_sep = vim.loop.os_uname().sysname == "Windows" and "\\" or "/"
 
+-- 传参个数不限制，功能是把传入的参数通过路径分隔符拼接起来
 local function path_join(...)
   return table.concat(vim.tbl_flatten({ ... }), path_sep)
 end
+-- 跟LSP signature相关的配置
+-- 下划线开头的变量根据http://lua-users.org/wiki/LuaStyleGuide这里的说明，似乎
+-- 是个不重要的变量，但是这个变量实际上被频繁用到
+-- 这里是个全局变量，在调用helper.log时，在里面可以直接用，而不需要传参
+-- 可以在init.vim中对这里面的key进行配置
 _LSP_SIG_CFG = {
   bind = true, -- This is mandatory, otherwise border config won't get registered.
+  -- 显示文档的行数，如果设置成0，则不显示，只显示signature
+  -- 这里的文档不是指cmp的预览doc，也不是按下K的doc，而是本插件提供一个signature_help上
+  -- 的doc，如果没有doc则只显示函数名、参数、当前第几个参数等信息，如果有doc会显示在下面
   doc_lines = 10, -- how many lines to show in doc, set to 0 if you only want the signature
+  -- signature_help的floating window最大的高度
   max_height = 12, -- max height of signature floating_window
+  -- signature_help的floating window最大的高度
   max_width = 80, -- max_width of signature floating_window
+  -- floating window中的signature_help或者doc是否换行
   wrap = true, -- allow doc/signature wrap inside floating_window, useful if your lsp doc/sig is too long
 
+  -- 是指是否显示signature_help，如果false则整个完全没了
   floating_window = true, -- show hint in a floating window
+  -- 把window放到当前行上方
   floating_window_above_cur_line = true, -- try to place the floating above the current line
 
+  -- 调整window的x坐标，横向上
+  -- 但是这个不是直接用，会加上一个值
   floating_window_off_x = 1, -- adjust float windows x position.
+  -- 调整window的y坐标，纵向上
   floating_window_off_y = 0, -- adjust float windows y position. e.g. set to -2 can make floating window move up 2 lines
+  -- 当参数都输入完之后，多久会自动关闭window
+  -- 这里如果要复现的话，注意输入完之后，光标不要放在最后一个参数上，可以移动到括号之后
+  -- 但是没有找到这个变量被用到的地方
   close_timeout = 4000, -- close floating window after ms when laster parameter is entered
+  -- 不知道这是干嘛的
   fix_pos = function(signatures, client) -- first arg: second argument is the client
     _, _ = signatures, client
     return true -- can be expression like : return signatures[1].activeParameter >= 0 and signatures[1].parameters > 1
   end,
   -- also can be bool value fix floating_window position
+
+  -- 开启hint
   hint_enable = true, -- virtual hint
+  -- hint前缀
   hint_prefix = "🐼 ",
+  -- 不知道有没有别的scheme类型
   hint_scheme = "String",
+  -- LSP里定义的高亮
+  -- 其他类型可以查看:h lsp-highlight
   hi_parameter = "LspSignatureActiveParameter",
+  -- lsp的handlers目前有两种，一种是hover（按K的文档），一种是signature_help
+  -- 传递的参数是配置border
   handler_opts = { border = "rounded" },
   cursorhold_update = true, -- if cursorhold slows down the completion, set to false to disable it
+  -- signature左右两侧的间隙填充字符，但是我加了这个配置后会报错
   padding = "", -- character to pad on left and right of signature
   always_trigger = false, -- sometime show signature on new line can be confusing, set it to false for #58
   -- set this to true if you the triggered_chars failed to work
@@ -52,6 +103,8 @@ _LSP_SIG_CFG = {
   log_path = path_join(vim.fn.stdpath("cache"), "lsp_signature.log"), -- log dir when debug is no
   verbose = false, -- debug show code line number
   extra_trigger_chars = {}, -- Array of extra characters that will trigger signature completion, e.g., {"(", ","}
+  -- 具体可以看:h nvim_open_win()，跟css中一样，越大就显示在前面
+  -- 另外nvim有几个自己hard-coded的zindex，分别是100、200、250，具体可以看帮助文档
   zindex = 200,
   transparency = nil, -- disabled by default
   shadow_blend = 36, -- if you using shadow as border use this set the opacity
@@ -64,35 +117,56 @@ _LSP_SIG_CFG = {
   move_cursor_key = nil, -- use nvim_set_current_win
 
   --- private vars
+  -- 这种私有变量放在cfg变量中，不合适吧
+  -- 在代码中还会看到其他变量也塞进_LSP_SIG_CFG
   winnr = nil,
   bufnr = 0,
   mainwin = 0,
 }
 
+-- 加载log方法
 local log = helper.log
+-- 初始化manager，每次进入insert模式前会调用
 function manager.init()
   manager.insertLeave = false
   manager.insertChar = false
   manager.confirmedCompletion = false
 end
 
+-- 显示hint的逻辑
+-- 触发时机：应该在lsp那边有signature_help的时候才触发
+-- 参数：hint，一个字符串，要显示的hint内容
+-- 参数：off_y，列坐标的偏移位置
 local function virtual_hint(hint, off_y)
+  -- hint为空或者不存在，则直接返回
   if hint == nil or hint == "" then
     return
   end
   local dwidth = fn.strdisplaywidth
+  -- 获取当前光标的位置，行坐标是从1开始，列坐标是从0开始
   local r = vim.api.nvim_win_get_cursor(0)
+  -- 获取当前光标所在行的buffer内容
   local line = api.nvim_get_current_line()
+  -- 获取当前光标所在行光标之前的内容，光标后面的会被截掉
   local line_to_cursor = line:sub(1, r[2])
+  -- 获取行号，从0开始
   local cur_line = r[1] - 1 -- line number of current line, 0 based
+  -- hint显示行位置，在当前行上方
   local show_at = cur_line - 1 -- show at above line
+  -- 当前window，光标之上有多少行
   local lines_above = vim.fn.winline() - 1
+  -- 当前window，光标之下有多少行，包含光标所在行
   local lines_below = vim.fn.winheight(0) - lines_above
+  -- 当上面的行数超过一半时，显示在光标下一行
   if lines_above > lines_below then
     show_at = cur_line + 1 -- same line
   end
+  -- 应该不是previous line的缩写，因为pl表示的是hint要显示的行的buffer内容
   local pl
+  -- 看当前是否有补全的menu显示，包括cmp的和内置ctrl-p的补全
   local completion_visible = helper.completion_visible()
+  -- 当off_y小于0时，如果补全menu可见，则hint显示在当前行，否则显示在下一行
+  -- 但目前off_y传参是hardcode为0，所以不会进入这个逻辑内
   if off_y ~= nil and off_y < 0 then -- floating win above first
     if completion_visible then
       show_at = cur_line -- pum, show at current line
@@ -109,18 +183,32 @@ local function virtual_hint(hint, off_y)
     end
   end
 
+  -- 当signature_help整个不显示，显示hint的逻辑
+  -- 优先级：上一行 > 下一行 > 当前行
   if _LSP_SIG_CFG.floating_window == false then
+    -- 光标的上一行和下一行内容
     local prev_line, next_line
+    -- 当cur_line=0时，也就是第一行，没有上一行
     if cur_line > 0 then
       prev_line = vim.api.nvim_buf_get_lines(0, cur_line - 1, cur_line, false)[1]
     end
     next_line = vim.api.nvim_buf_get_lines(0, cur_line + 1, cur_line + 2, false)[1]
+    -- 上一行宽度如果比当前光标的列坐标还要小，则显示在上一行
+    -- 也就是说，hint如果要显示在上一行，不能挡住上一行的内容，应显示在后面空白处
+    -- @todo：这里有个bug，当光标离离窗口右边的border很近时，hint会显示不全
     if prev_line and vim.fn.strdisplaywidth(prev_line) < r[2] then
       show_at = cur_line - 1
       pl = prev_line
     elseif next_line and dwidth(next_line) < r[2] + 2 and not completion_visible then
+    -- 同理，如果下一行的宽度只比当前光标的列坐标大2个宽度，则显示在下一行
+    -- 注意：这里跟上一行的区别是2个宽度（不知道为啥），且没有补全的menu
+    -- @todo：这里有个bug，当按下ctrl-p显示popupmenu补全时，hint会被遮挡
+    --        不过这个问题可能不好修复，因为这个插件是先感知menu是否存在，再决定hint显示的行为
+    --        但是如果hint显示之后，menu的变化是感知不到的
+    elseif next_line and vim.fn.strdisplaywidth(next_line) < r[2] + 2 and not completion_visible then
       show_at = cur_line + 1
       pl = next_line
+    -- 其他情况就显示在当前行
     else
       show_at = cur_line
     end
@@ -128,13 +216,17 @@ local function virtual_hint(hint, off_y)
     log("virtual text only :", prev_line, next_line, r, show_at, pl)
   end
 
+  -- 如果是在第一行，则显示在当前行
   if cur_line == 0 then
     show_at = 0
   end
   -- get show at line
+  -- 如果pl是空的，则获取hint要显示的行的buffer内容
   if not pl then
     pl = vim.api.nvim_buf_get_lines(0, show_at, show_at + 1, false)[1]
   end
+  -- 如果show_at是在最后一行+1，这时候buffer内容会返回nil，已经没有下一行了
+  -- 所以show_at只能又切换回当前行
   if pl == nil then
     show_at = cur_line -- no lines below
   end
@@ -142,6 +234,7 @@ local function virtual_hint(hint, off_y)
   local pad = ""
   local line_to_cursor_width = dwidth(line_to_cursor)
   local pl_width = dwidth(pl)
+  -- 如果hint不在当前行，且光标超过了显示行的宽度，则通过pad来让hint跟光标对齐
   if show_at ~= cur_line and line_to_cursor_width > pl_width + 1 then
     pad = string.rep(" ", line_to_cursor_width - pl_width)
     local width = vim.api.nvim_win_get_width(0)
@@ -151,16 +244,23 @@ local function virtual_hint(hint, off_y)
       pad = string.rep(" ", math.max(1, line_to_cursor_width - pl_width - hint_width - 6))
     end
   end
+  -- NS表示namespace，在neovim中namespace用于高亮和virtual text，后者就是这里的hint
   _LSP_SIG_VT_NS = _LSP_SIG_VT_NS or vim.api.nvim_create_namespace("lsp_signature_vt")
 
+  -- 显示前先刷掉之前的virtual text
   helper.cleanup(false) -- cleanup extmark
 
+  -- virt_text，详见:h nvim_buf_set_extmark下面的opts参数中的virt_text
+  -- 是一个[text, highlight]二元组，所以这里的hint_scheme似乎是一个高亮的组
+  -- 因为hint_scheme默认是String，所以高亮颜色跟代码中的字符串一样
   local vt = { pad .. _LSP_SIG_CFG.hint_prefix .. hint, _LSP_SIG_CFG.hint_scheme }
 
   log("virtual text: ", cur_line, show_at, vt)
   if r ~= nil then
+    -- 开启显示
     vim.api.nvim_buf_set_extmark(0, _LSP_SIG_VT_NS, show_at, 0, {
       virt_text = { vt },
+      -- 显示在eol字符之后
       virt_text_pos = "eol",
       hl_mode = "combine",
       -- hl_group = _LSP_SIG_CFG.hint_scheme
@@ -168,14 +268,20 @@ local function virtual_hint(hint, off_y)
   end
 end
 
+-- 四种事件会触发signature_help和hint关闭
+-- 分别是：光标在normal和insert模式下的移动、buffer隐藏、输入字符
+-- 输入字符触发关闭，然后如果有新的会重新显示
 local close_events = { "CursorMoved", "CursorMovedI", "BufHidden", "InsertCharPre" }
 
 -- ----------------------
 -- --  signature help  --
 -- ----------------------
 -- Note: nvim 0.5.1/0.6.x   - signature_help(err, {result}, {ctx}, {config})
+
+-- handler相关文档可以查看:h lsp-handler，介绍了怎么用，这四个参数的意思
 local signature_handler = function(err, result, ctx, config)
   log("signature handler")
+  -- 这个err是lsp server传过来的，如果不为nil表示lsp遇到了问题
   if err ~= nil then
     print(err)
     return
@@ -188,8 +294,14 @@ local signature_handler = function(err, result, ctx, config)
   --     return
   --   end
   -- end
+
+  -- lsp client的id
   local client_id = ctx.client_id
+  -- buffer的number，跟:ls 的数字是相同的，0表示当前buffer
   local bufnr = ctx.bufnr
+  -- 这个result是lsp server传过来的
+  -- 如果lsp server返回的result中没有signature，需要关闭floating window(即signature_help)
+  -- 和virtual text(即hint)
   if result == nil or result.signatures == nil or result.signatures[1] == nil then
     -- only close if this client opened the signature
     log("no valid signatures", result)
@@ -202,6 +314,7 @@ local signature_handler = function(err, result, ctx, config)
 
     return
   end
+  -- 如果当前所在的buffer跟lsp返回的buffer不是同一个，则忽略
   if api.nvim_get_current_buf() ~= bufnr then
     log("ignore outdated signature result")
     return
@@ -212,7 +325,10 @@ local signature_handler = function(err, result, ctx, config)
   end
 
   if config.trigger_from_next_sig then
+    -- 如果返回的signature个数超过1个，函数重载的情况
     if #result.signatures > 1 then
+      -- 不知道这一步什么意思
+      -- 实现的逻辑是把result.signatures前面cnt个元素放到末尾去
       local cnt = math.abs(config.activeSignature - result.activeSignature)
       for _ = 1, cnt do
         local m = result.signatures[1]
@@ -227,12 +343,35 @@ local signature_handler = function(err, result, ctx, config)
   log("sig result", ctx, result, config)
   _LSP_SIG_CFG.signature_result = result
 
+  -- 到目前位置result.activeSignature是没有被修改过的(也不应该被修改，好的代码习惯)，
+  -- 都是从lsp server过来的
   local activeSignature = result.activeSignature or 0
+  -- 这里加1的原因是lsp server返回的0-based的索引，而在lua里index是从1开始的
   activeSignature = activeSignature + 1
+  -- 避免越界
   if activeSignature > #result.signatures then
     -- this is a upstream bug of metals
     activeSignature = #result.signatures
   end
+
+  -- result的结构如下
+  -- {
+  --   activeParameter = 1,
+  --   activeSignature = 0,
+  --   cfgActiveSignature = 0, -- 这个是上面的代码加入的，不是lsp返回的
+  --   signatures =
+  --   {
+  --     {
+  --       documentation = "Returns void",
+  --       label = "addNumber(int a, int b) -> void",
+  --       parameters =
+  --       {
+  --         { label = { 10, 15 } }, -- 数字表示函数中参数的字符位置范围
+  --         { label = { 17, 22 } },
+  --       }
+  --     }
+  --   }
+  -- }
 
   local actSig = result.signatures[activeSignature]
 
@@ -243,7 +382,12 @@ local signature_handler = function(err, result, ctx, config)
   end
 
   -- label format and trim
+  -- 把字符串中的\n\r\t替换成空格
+  -- 这里的label应该就是指floating window里展示的内容，不包括doc
+  -- floating window会展示两部分内容，label和doc
   actSig.label = string.gsub(actSig.label, "[\n\r\t]", " ")
+  -- 遍历parameters里的label，如果是字符串，也替换\n\r\t
+  -- 不过从上面那个例子来看，label也可能是一个数字的数组
   if actSig.parameters then
     for i = 1, #actSig.parameters do
       if type(actSig.parameters[i].label) == "string" then
@@ -253,14 +397,20 @@ local signature_handler = function(err, result, ctx, config)
   end
 
   -- if multiple signatures existed, find the best match and correct parameter
+  -- 当函数中存在多个参数时，找到当前匹配的那个
+  -- 这里的hint是指参数的字符串，比如'int num'
+  -- s表示参数的起始位置，l表示结束位置
   local _, hint, s, l = match_parameter(result, config)
   local force_redraw = false
   if #result.signatures > 1 then
+    -- 跟signature的个数有啥关系？
     force_redraw = true
     for i = #result.signatures, 1, -1 do
       local sig = result.signatures[i]
       -- hack for lua
+      -- 从上面的例子看，似乎signature下面并没有activeParameter这个key，而result有
       local actPar = sig.activeParameter or result.activeParameter or 0
+      -- 当activeparameter存在时，防止越界
       if actPar > 0 and actPar + 1 > #(sig.parameters or {}) then
         log("invalid lsp response, active parameter out of boundary")
         -- reset active parameter to last parameter
@@ -677,21 +827,26 @@ end
 
 M.signature = signature
 
+-- 在autocmd中调用，订阅的是InsertCharPre事件
 function M.on_InsertCharPre()
   manager.insertChar = true
 end
 
+-- 在autocmd中调用，订阅的是InsertLeave 事件
 function M.on_InsertLeave()
   line_to_cursor_old = ""
+  -- 当前的mode，具体有哪些mode，可以看下:h mode()
   local mode = vim.api.nvim_get_mode().mode
 
   log("mode:   ", mode)
   if mode == "niI" or mode == "i" or mode == "s" then
+    -- @todo：这条log有问题，1、niI？2、可以直接用上面的mode变量，不要重复获取
     log("mode:  niI ", vim.api.nvim_get_mode().mode)
     return
   end
 
   local delay = 0.2 -- 200ms
+  -- vim.defer_fn()用于延迟执行函数
   vim.defer_fn(function()
     mode = vim.api.nvim_get_mode().mode
     log("mode:   ", mode)
@@ -781,6 +936,7 @@ function M.on_UpdateSignature()
   log("Insert leave cleanup", m)
 end
 
+-- 如果你的配置中有一些已经被废弃的参数，会提示出来
 M.deprecated = function(cfg)
   if cfg.trigger_on_new_line ~= nil or cfg.trigger_on_nomatch ~= nil then
     print("trigger_on_new_line and trigger_on_nomatch deprecated, using always_trigger instead")
@@ -797,6 +953,7 @@ M.deprecated = function(cfg)
   end
 end
 
+-- 当日志文件大小超限时，删除日志文件
 local function cleanup_logs(cfg)
   local log_path = cfg.log_path or _LSP_SIG_CFG.log_path or nil
   local fp = io.open(log_path, "r")
@@ -908,6 +1065,7 @@ local signature_should_close_handler = helper.mk_handler(function(err, result, c
   end
 end)
 
+-- 检查sig是否能关闭
 M.check_signature_should_close = function()
   if _LSP_SIG_CFG.winnr and _LSP_SIG_CFG.winnr > 0 and vim.api.nvim_win_is_valid(_LSP_SIG_CFG.winnr) then
     local params = vim.lsp.util.make_position_params()
