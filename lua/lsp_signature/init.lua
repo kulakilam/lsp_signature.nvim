@@ -954,6 +954,7 @@ M.deprecated = function(cfg)
 end
 
 -- 当日志文件大小超限时，删除日志文件
+-- 在加载这个插件的时候执行
 local function cleanup_logs(cfg)
   local log_path = cfg.log_path or _LSP_SIG_CFG.log_path or nil
   local fp = io.open(log_path, "r")
@@ -966,6 +967,7 @@ local function cleanup_logs(cfg)
   end
 end
 
+-- 加载插件的入口代码
 M.on_attach = function(cfg, bufnr)
   bufnr = bufnr or 0
 
@@ -1145,12 +1147,18 @@ M.signature_handler = signature_handler
 -- setup function enable the signature and attach it to client
 -- call it before startup lsp client
 
+-- 加载插件的入口代码
 M.setup = function(cfg)
   cfg = cfg or {}
   M.deprecated(cfg)
+  -- 这里打印日志其实不会生效，因为log函数依赖_LSP_SIG_CFG里面的配置，
+  -- 而用户配置的cfg是在M.on_attach()里面才合并到_LSP_SIG_CFG
   log("user cfg:", cfg)
   local _start_client = vim.lsp.start_client
   _LSP_SIG_VT_NS = api.nvim_create_namespace("lsp_signature_vt")
+  -- 这段代码让我很困惑
+  -- 1. lsp_config从哪来的
+  -- 2. 这个函数中执行了_start_client()，也就是执行了vim.lsp_start_client()，会不会对LSP产生什么影响？
   vim.lsp.start_client = function(lsp_config)
     if lsp_config.on_attach == nil then
       -- lsp_config.on_attach = function(client, bufnr)

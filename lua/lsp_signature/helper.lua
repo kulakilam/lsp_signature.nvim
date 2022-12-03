@@ -352,17 +352,25 @@ helper.cleanup_async = function(close_float_win, delay, force)
   end, delay * 1000)
 end
 
+-- 获取border的高度，这里的高度是指floating window的上下两边占用的宽度
 local function get_border_height(opts)
+  -- 具体有哪些border类型，可以看:h nvim_open_win()
   local border_height = { none = 0, single = 2, double = 2, rounded = 2, solid = 2, shadow = 1 }
+  -- 如果使用的是默认border，这里应该是内置的类型，也就是上面这几种
+  -- 如果是自定义的border，这里是个table
   local border = opts.border
   local height = 0
   if border == nil then
     return
   end
 
+  -- 使用自定义的border类型
   if type(border) == "string" then
     height = border_height[border]
   else
+    -- 如果border变量是table，存在两种可能性
+    -- 1、元素也是个table，是一个<character, highlight group>的二元组，这时候取第一个来判断
+    -- 2、元素是个character，直接判断
     local function _border_height(id)
       id = (id - 1) % #border + 1
       if type(border[id]) == "table" then
@@ -373,6 +381,7 @@ local function get_border_height(opts)
         return #border[id] > 0 and 1 or 0
       end
     end
+    -- 传参是border变量的元素index，border是从左上角开始顺时针排序的字符table，所以2是top，6是bottom
     height = height + _border_height(2) -- top
     height = height + _border_height(6) -- bottom
   end
@@ -397,7 +406,7 @@ helper.cal_pos = function(contents, opts)
   local lines_below = fn.winheight(0) - fn.winline() -- not counting current
   -- wont fit if move floating above current line
   -- 如果floating_window_above_cur_line配置了false，或者光标上面只有一行，则直接返回
-  -- @todo：这里为什么是2？
+  -- @todo：这里为什么是2而不是1（上面没有别的行了）呢？
   if not _LSP_SIG_CFG.floating_window_above_cur_line or lnum <= 2 then
     return {}, 0
   end
@@ -418,45 +427,79 @@ helper.cal_pos = function(contents, opts)
   util.try_trim_markdown_code_blocks(contents)
   log(vim.inspect(contents))
 
+  -- 计算floating window的宽、高，不包括border
+  -- @todo：有个bug，这里height是按照contents的元素个数（当然也会计算换行的情况），会把
+  --        markdown的两行```也算进去，但是最终floating window不会显示这两行，所以需要-2
   local width, height = util._make_floating_popup_size(contents, opts)
+  -- 返回一个table，可以最后传给nvim_open_win()
+  -- anchor是通过你所在光标加上你传入的offset，计算出来floating window是位于哪个方位
+  -- 通过当前window的行列，划分成NW、NE、SE、SW
+  -- 传入的height是floating window中内容的行数，返回的float_option.height可能小于传入的height
+  -- 比如本来要显示5行，但是显示区域只有3行，float_option.height会被降为3，这种情况比较特殊，
+  -- 需要把window区域缩到比较小，且内容行数比较多（比如函数重载）的时候可以复现。
   local float_option = util.make_floating_popup_options(width, height, opts)
 
   log("popup size:", width, height, float_option)
+  -- 0在N区域表示把整个floating window放到当前行的下方，
+  --  在S区域表示把整个floating window放到当前行的上方，
+  -- -x就是往相反方向移动x行
   local off_y = 0
+  -- @todo：变量取名max_height，但是后面是用or，感觉是个bug，float_option.height是一定会>0的
+  --        所以max_height永远不会生效
   local max_height = float_option.height or _LSP_SIG_CFG.max_height
+  -- 获取border的高度，也就是上下两边占据的宽度，一般是2
+  -- 如果没有border则为0，如果是shadow则为1，自定义的另说
   local border_height = get_border_height(float_option)
   -- shift win above current line
+  -- 最终效果是默认显示在当前行上方，不管是在N还是S区域
+  -- 但是需要考虑一个异常情况，就是当上方显示不下，需要调整到下方。
+  -- 另外关于如何默认放到上方，应该是需要结合floating window本身设定的规则
+  -- 从日志发现，当在N区域时，off_y为0默认显示在下方，在S区域，off_y为0默认显示在上方
+  -- 所以下面的代码只有在N区域时才需要调整off_y，而S区域则不需要
   if float_option.anchor == "NW" or float_option.anchor == "NE" then
     -- note: the floating widnows will be under current line
+    -- 如果光标以上的空间能放下floating window，则显示在光标之上，这时候要调整off_y往上移动
     if lines_above >= float_option.height + border_height + 1 then
+      -- N区域off_y为0时，是在当前行的下一行，所以需要往上移动整个floating window的高度
+      -- 另外还要加1，因为要跨过当前行
+      -- @todo：这里是不是可以通过把anchor改成SW或SE，而不用改off_y，让floating window转到另一侧呢
       off_y = -(float_option.height + border_height + 1)
       max_height = math.min(max_height, math.max(lines_above - border_height - 1, border_height + 1))
     else
       -- below
+      -- 如果光标以上的空间装不下，则显示在当前行之下
       max_height = math.min(max_height, math.max(lines_below - border_height - 1, border_height + 1))
     end
   else
     -- above
+    -- S区域off_y为0时，本来默认就是在上方，所以不需要重新计算off_y
     max_height = math.min(max_height, math.max(lines_above - border_height - 1, border_height + 1))
   end
 
   log(float_option, off_y, lines_above, max_height)
+  -- 兜底，如果floating window中显示内容的行数不存在或者为0，置为1
   if not float_option.height or float_option.height < 1 then
     float_option.height = 1
   end
   float_option.max_height = max_height
+  -- 从make_floating_popup_options获取float_option这个table之后，只对height做了重新计算
+  -- max_height返回之后并没有用到
   return float_option, off_y, contents, max_height
 end
 
 local nvim_0_6
 function helper.nvim_0_6()
+  -- 这里相当于缓存，不用每次都往下走
   if nvim_0_6 ~= nil then
     return nvim_0_6
   end
   -- if debug.getinfo(vim.lsp.handlers.signature_help).nparams == 4 then
+  -- 详情看:h has()
+  -- 0.6.1及以上的版本，在执行has("nvim-0.6.1")是都会返回1，低版本会返回0
   if vim.fn.has("nvim-0.6.1") == 1 then
     nvim_0_6 = true
   else
+    -- @todo：这个插件为啥需要0.6.1以上的版本？
     vim.notify("nvim-0.6.1 is required for this plugin", { timeout = 5000 })
     nvim_0_6 = false
   end
