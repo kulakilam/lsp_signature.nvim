@@ -15,7 +15,11 @@ local function is_special(ch)
   return contains(special_chars, ch)
 end
 
+-- 日志打印，传入参数个数不限制
+-- 这里面用的都是_LSP_SIG_CFG这个配置变量，在init.lua的on_attach中会把默认的这个变量和
+-- 用户配置的做合并，所以在on_attach之前使用log，用户配置的不会生效
 helper.log = function(...)
+  -- 如果要关闭日志打印，需要debug和verbose两个都置为false（不为true）
   if _LSP_SIG_CFG.debug ~= true and _LSP_SIG_CFG.verbose ~= true then
     return
   end
@@ -27,11 +31,19 @@ helper.log = function(...)
   -- local info = debug.getinfo(2, "Sl")
 
   if _LSP_SIG_CFG.verbose == true then
+    -- debug.getinfo会返回function的信息，所以需要指定哪个function，以及要什么字段信息
+    -- 第一个参数，指定哪个function，对应的是调用栈里的顺序，0表示getinfo本身，
+    --             1是再往上一层，在这里是指log函数，所以2是再往上指向调用log的函数，
+    --             详见:h debug.getinfo()
+    -- 第二个参数，S表示当前文件名，l表示当前代码行，详见:h lua_getinfo()
     local info = debug.getinfo(2, "Sl")
+    -- 文件名 + 哪一行
     local lineinfo = info.short_src .. ":" .. info.currentline
     str = str .. lineinfo
   end
 
+  -- 遍历传入的参数，如果是table，使用vim.inspect输出，其他类型的变量都转成字符串输出
+  -- 然后都拼成一个str字符串
   for i, v in ipairs(arg) do
     if type(v) == "table" then
       str = str .. " |" .. tostring(i) .. ": " .. vim.inspect(v) .. "\n"
@@ -39,7 +51,10 @@ helper.log = function(...)
       str = str .. " |" .. tostring(i) .. ": " .. tostring(v)
     end
   end
+  -- 判断时候有内容要输出（因为有个2字符的前缀）
+  -- @todo：这里有个bug，应该是4 bytes
   if #str > 2 then
+    -- 输出到文件
     if log_path ~= nil and #log_path > 3 then
       local f = io.open(log_path, "a+")
       if f == nil then
@@ -48,6 +63,7 @@ helper.log = function(...)
       io.output(f)
       io.write(str .. "\n")
       io.close(f)
+    -- 如果没有配置日志文件，则直接stdout到命令行位置
     else
       print(str .. "\n")
     end

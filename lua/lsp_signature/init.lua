@@ -99,6 +99,7 @@ _LSP_SIG_CFG = {
   -- this will allow lsp server decide show signature or not
   auto_close_after = nil, -- autoclose signature after x sec, disabled if nil.
   check_completion_visible = true, -- adjust position of signature window relative to completion popup
+  -- debug开关，跟日志打印有关
   debug = false,
   log_path = path_join(vim.fn.stdpath("cache"), "lsp_signature.log"), -- log dir when debug is no
   verbose = false, -- debug show code line number
@@ -971,6 +972,7 @@ end
 M.on_attach = function(cfg, bufnr)
   bufnr = bufnr or 0
 
+  -- 开启定义一个autocmd组
   api.nvim_command("augroup Signature")
   api.nvim_command("autocmd! * <buffer>")
   api.nvim_command("autocmd InsertEnter <buffer> lua require'lsp_signature'.on_InsertEnter()")
@@ -986,6 +988,7 @@ M.on_attach = function(cfg, bufnr)
   end
 
   api.nvim_command("augroup end")
+  -- autogroup结束
 
   if type(cfg) == "table" then
     _LSP_SIG_CFG = vim.tbl_extend("keep", cfg, _LSP_SIG_CFG)
