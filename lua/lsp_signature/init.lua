@@ -218,6 +218,7 @@ local function virtual_hint(hint, off_y)
   end
 
   -- 如果是在第一行，则显示在当前行
+  -- @todo：这里有bug，应该是光标处于当前窗口第一行，而cur_line是行号
   if cur_line == 0 then
     show_at = 0
   end
